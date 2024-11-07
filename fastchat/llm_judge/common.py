@@ -20,6 +20,7 @@ from fastchat.model.model_adapter import (
     OPENAI_MODEL_LIST,
 )
 
+from azure.identity import ManagedIdentityCredential, get_bearer_token_provider 
 # API setting constants
 API_MAX_RETRY = 16
 API_RETRY_SLEEP = 10
@@ -61,6 +62,7 @@ class Judge:
     prompt_template: dict
     ref_based: bool = False
     multi_turn: bool = False
+    azure_deployment_name: str = None
 
 
 @dataclasses.dataclass
@@ -132,7 +134,9 @@ def load_judge_prompts(prompt_file: str):
     return prompts
 
 
-def run_judge_single(question, answer, judge, ref_answer, multi_turn=False):
+def run_judge_single(
+    question, answer, judge, ref_answer, multi_turn=False, azure_deployment_name=None
+):
     kwargs = {}
     model = judge.model_name
     if ref_answer is not None:
@@ -163,7 +167,11 @@ def run_judge_single(question, answer, judge, ref_answer, multi_turn=False):
     conv.append_message(conv.roles[0], user_prompt)
     conv.append_message(conv.roles[1], None)
 
-    if model in OPENAI_MODEL_LIST:
+    if azure_deployment_name:
+        judgment = chat_completion_openai_azure(
+            azure_deployment_name, conv, temperature=0, max_tokens=2048
+        )
+    elif model in OPENAI_MODEL_LIST:
         judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
     elif model in ANTHROPIC_MODEL_LIST:
         judgment = chat_completion_anthropic(
@@ -201,7 +209,12 @@ def play_a_match_single(match: MatchSingle, output_file: str):
 
     if judge.prompt_template["type"] == "single":
         score, user_prompt, judgment = run_judge_single(
-            question, answer, judge, ref_answer, multi_turn=multi_turn
+            question,
+            answer,
+            judge,
+            ref_answer,
+            multi_turn=multi_turn,
+            azure_deployment_name=judge.azure_deployment_name,
         )
 
         question_id = question["question_id"]
@@ -430,13 +443,19 @@ def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
 
 def chat_completion_openai_azure(model, conv, temperature, max_tokens, api_dict=None):
     openai.api_type = "azure"
-    openai.api_version = "2023-07-01-preview"
+    openai.api_version = "2024-05-01-preview"
+    
+    scope = "https://cognitiveservices.azure.com/.default"
+    client_id = "258f6dab-3e80-4254-83e3-bfb24a9ae8d9" #This is the current EAI ID
+    token_provider = get_bearer_token_provider(ManagedIdentityCredential(client_id=client_id), scope)
+    
     if api_dict is not None:
         openai.api_base = api_dict["api_base"]
         openai.api_key = api_dict["api_key"]
     else:
         openai.api_base = os.environ["AZURE_OPENAI_ENDPOINT"]
-        openai.api_key = os.environ["AZURE_OPENAI_KEY"]
+        openai.api_key = token_provider
+        openai.azure_ad_token_provider = token_provider
 
     if "azure-" in model:
         model = model[6:]
